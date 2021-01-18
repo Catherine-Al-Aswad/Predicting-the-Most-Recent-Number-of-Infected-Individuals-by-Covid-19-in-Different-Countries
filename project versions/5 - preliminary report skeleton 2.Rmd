@@ -1,0 +1,1245 @@
+---
+title: "Predicting the most recent number of Infected Individuals in different countries"
+author: "Catherine Al Aswad, Ali Alhakeem, Uyen Dao, Long Kim Long"
+date: " Last Updated 11/11/2020"
+output:
+  html_document:
+    fig_caption: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 2
+    df_print: kable
+    toc_float:
+      collapsed: no
+---
+
+```{r, include=FALSE}
+# Do not edit this code block/chunk
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning = FALSE, fig.width = 16/2.5, fig.height = 9/2.5)
+```
+
+
+```{r Packages}
+# Load all necessary packages here:
+library(tidyverse) 
+library(janitor)
+library(moderndive)
+library(here)
+library(knitr)
+library(readxl)
+library(tibbletime)    #to sort a variable of type 'date'
+library(MASS)    #for box-cox
+library(car)    #for vif and qqplot()
+library(plotly)   # for interactive graphs
+library(olsrr)   # cook's distance
+library(GGally)    # ggpairs()
+library(corrplot)   #fancy correlation matrix
+library(splines)
+
+
+```
+
+```{r Wrangling}
+# data wrangling code:
+#reading in the code
+confirmed_cases <- read_csv(here("time_series_covid19_confirmed_global_2.csv"))
+indicator_data <- read_csv(here("indicator data 2.csv"))
+total_population <- read_xls(here("total_population.xls"))
+
+age_population_prop <- read_xls(here("age_group_population_proportion.xls"))
+nurses_midwives <- read_xls(here("nurses_and_midwives.xls"))
+Smoking_prevalence_15 <- read_xls(here("Smoking_prevalence_15+.xls"))
+
+
+
+## confirmed cases data set
+# selecting the columns we need
+# pivoting the table to tidy it
+confirmed_cases_tidy <- confirmed_cases %>%
+    dplyr::select(-c("Province/State", "Lat", "Long")) %>%
+    pivot_longer(names_to = "date",    
+               values_to = "cumulative_confirmed_cases", 
+               cols = -"Country/Region" ) 
+
+# changing column names (doing it early because a name with / without "" causes problems later)
+colnames(confirmed_cases_tidy) <- c("Country" , "Date" , "cumulative_confirmed_cases")
+
+# Taking the sum of confirmed cases of all the regions in a country; before, the cases were per region in each country, we are summing them to get total per country, irrelevant of region
+# Changed the date and country type, so that it is not hard to join them later
+# filter the data for the date we want: 2020-10-23, the earliest day for doing the study (known before starting the analysis)
+confirmed_cases_tidy <- confirmed_cases_tidy %>%
+    group_by(Country, Date) %>%
+    summarise(cumulative_confirmed_cases = sum(cumulative_confirmed_cases)) %>%    
+    mutate(Date = as.Date(Date, format = "%m/%d/%y"),
+           Country = as.factor(Country)) %>%
+    arrange(Date) %>%
+    as_tbl_time(index = Date) %>%
+    filter_time(time_formula = ~ '2020-10-23')   
+
+# Some countries are referred to differently in each data set, so we fixed their names to be consistent, so some country data is not lost. The countries whose alternative names are not obvious where searched to make sure that they are correct. 
+# The code commented out below was used to check for inconsistent country names:
+# setdiff(unique(total_population_tidy$Country),unique(indicator_data_tidy$Country))
+# setdiff(unique(indicator_data_tidy$Country),unique(total_population_tidy$Country))
+# 
+# setdiff(unique(total_population_tidy$Country),unique(confirmed_cases_tidy$Country))
+# setdiff(unique(confirmed_cases_tidy$Country),unique(total_population_tidy$Country))
+# 
+# setdiff(unique(indicator_data_tidy$Country), unique(confirmed_cases_tidy$Country))
+# setdiff(unique(confirmed_cases_tidy$Country), unique(indicator_data_tidy$Country))
+
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="US"] = "United States"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Taiwan*"] = "Taiwan"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Burma"] = "Myanmar"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Korea, South"] = "Republic of Korea (South)"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Slovakia"] = "Slovak Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Czechia"] = "Czech Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Congo (Brazzaville)"] = "The Republic of Congo"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Congo (Kinshasa)"] = "The Democratic Republic of Congo"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Kyrgyzstan"] = "Kyrgyz Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Iran"] = "Islamic Republic of Iran"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Syria"] = "Syrian Arab Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Russia"] = "Russian Federation"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Egypt"] = "Arab Republic of Egypt"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Yemen"] = "Republic of Yemen"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Venezuela"] = "Venezuela, RB"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Brunei"] = "Brunei Darussalam"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Laos"] = "Lao People's Democratic Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Saint Kitts and Nevis"] = "St. Kitts and Nevis"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Saint Vincent and the Grenadines"] = "St. Vincent and the Grenadines"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Saint Lucia"] = "St. Lucia"
+
+
+
+
+## indicator data set
+# removed the first row which are the column titles
+# selected the columns we want ( we knew in advance which indices we will use)
+# changed the date and country type to facilitate joining them later
+# took the average index for a country (we have regional indices, but we want it for the entire country)
+# filtered the data for the date we want (known before starting the analysis)
+indicator_data_tidy <- indicator_data[-1,] %>%
+   dplyr::select("CountryName", "Date", "StringencyIndex", "EconomicSupportIndex") %>%
+   mutate(Date = as.Date(Date, format = "%Y%m%d"),
+          CountryName = as.factor(CountryName)) %>%
+   group_by(CountryName, Date) %>%
+   summarise(StringencyIndex = mean(StringencyIndex, na.rm=TRUE),
+             EconomicSupportIndex = mean(EconomicSupportIndex, na.rm = TRUE)) %>%
+   arrange(Date) %>%
+   as_tbl_time(index = Date) %>%
+   filter_time(time_formula = ~ '2020-06-15')   
+
+# Changed the column names
+colnames(indicator_data_tidy) <- c("Country" , "Date" ,  "Stringency_Index", "Economic_Support_Index")
+
+# Some countries are referred to differently in each data set, so we fixed their names to be consistent, so some country data is not lost. The countries whose alternative names are not obvious where searched to make sure that they are correct. 
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Cape Verde"] = "Cabo Verde"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Palestine"] = "West Bank and Gaza"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Congo"] = "The Republic of Congo"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Democratic Republic of Congo"] =  "The Democratic Republic of Congo"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Iran"] = "Islamic Republic of Iran"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Syria"] = "Syrian Arab Republic"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Hong Kong"] = "Hong Kong SAR, China"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Russia"] = "Russian Federation"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="South Korea"] = "Republic of Korea (South)"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Egypt"] = "Arab Republic of Egypt"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Yemen"] = "Republic of Yemen"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Venezuela"] = "Venezuela, RB"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Brunei"] = "Brunei Darussalam"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Laos"] = "Lao People's Democratic Republic"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Macao"] = "Macao SAR, China"
+
+
+
+#population data set
+# removed first 3 rows: an entirely empty row, the title row, and a row not about a country
+# selected the columns we want: using 2019 population (...64) because 2020 population (...65) is not available  
+# there is a line for 'Not classified' data source and is the only one with an na population in 2019; removed it
+# fixed data types
+total_population_tidy <- total_population[-c(1:3),] %>%  
+  dplyr::select("Data Source", "...64") %>% 
+  na.omit() %>%  
+  mutate(...64 = as.double(...64))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(total_population_tidy) <- c("Country" , "Population2019")
+
+# fixed the country type to the join works
+total_population_tidy <- total_population_tidy %>%
+  mutate(Country = as.factor(Country))       
+
+# Some countries are referred to differently in each data set, so we fixed their names to be consistent, so some country data is not lost. The countries whose alternative names are not obvious where searched to make sure that they are correct. 
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)== "Virgin Islands (U.S.)"] = "United States Virgin Islands"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Iran, Islamic Rep."] = "Islamic Republic of Iran"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Gambia, The"] = "Gambia"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+
+
+## age_population_prop data set:   			percent of population with ages 15-64
+age_population_prop_tidy <- age_population_prop[-c(1:3),] %>% 
+  dplyr::select("Data Source", "...64") %>% 
+  na.omit() %>%  
+  mutate(...64 = as.double(...64))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(age_population_prop_tidy) <- c("Country" , "age15_64_population_prop_2019")
+
+# fixed the country type to the join works
+age_population_prop_tidy <- age_population_prop_tidy %>%
+  mutate(Country = as.factor(Country)) 
+
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)== "Virgin Islands (U.S.)"] = "United States Virgin Islands"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Iran, Islamic Rep."] = "Islamic Republic of Iran"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Gambia, The"] = "Gambia"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+
+
+## nurses_midwives data set:   		Nurses and midwives (per 1,000 people)
+nurses_midwives_tidy <- nurses_midwives[-c(1:3),] %>% 
+  dplyr::select("Data Source", "...63") %>% 
+  na.omit() %>%  
+  mutate(...63 = as.double(...63))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(nurses_midwives_tidy) <- c("Country" , "nurses_midwives_per_1000_2018")
+
+# fixed the country type to the join works
+nurses_midwives_tidy <- nurses_midwives_tidy %>%
+  mutate(Country = as.factor(Country)) 
+
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+
+## Smoking_prevalence_15 data set:   			 Total smoking prevalence (ages 15+) ages 15+
+Smoking_prevalence_15_tidy <- Smoking_prevalence_15[-c(1:3),] %>% 
+  dplyr::select("Data Source", "...61") %>% 
+  na.omit() %>%  
+  mutate(...61 = as.double(...61))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(Smoking_prevalence_15_tidy) <- c("Country" , "Smoking_prevalence_15_2016")
+
+# fixed the country type to the join works
+Smoking_prevalence_15_tidy <- Smoking_prevalence_15_tidy %>%
+  mutate(Country = as.factor(Country)) 
+
+
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Iran, Islamic Rep."] = "Islamic Republic of Iran"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Gambia, The"] = "Gambia"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+# setdiff(unique(diabetes_prevelance_tidy$Country),unique(indicator_data_tidy$Country))
+# setdiff(unique(indicator_data_tidy$Country),unique(water_sanitation_access_tidy$Country))
+# 
+# setdiff(unique(diabetes_prevelance_tidy$Country),unique(confirmed_cases_tidy$Country))
+# setdiff(unique(confirmed_cases_tidy$Country),unique(water_sanitation_access_tidy$Country))
+# 
+# setdiff(unique(diabetes_prevelance_tidy$Country), unique(total_population_tidy$Country))
+# setdiff(unique(total_population_tidy$Country), unique(water_sanitation_access_tidy$Country))
+
+ 
+
+
+## final joint data set
+# did the join by country
+# created our dependent variable (there is no population of zero when dividing, and neither variable used has missing values)
+# removed missing values (only the indices had missing values)
+ tidy_joined_dataset <-  indicator_data_tidy %>%
+    inner_join(confirmed_cases_tidy, by = c ("Country")) %>%
+    inner_join(total_population_tidy, by = c ("Country")) %>%
+    inner_join(age_population_prop_tidy, by = c ("Country")) %>%
+    inner_join(nurses_midwives_tidy, by = c ("Country")) %>%
+    inner_join(Smoking_prevalence_15_tidy, by = c ("Country")) %>%
+    mutate(cumulative_confirmed_cases_per_10000 = (cumulative_confirmed_cases/Population2019)*10000,
+           Economic_Support_Index_levels = cut(Economic_Support_Index, 
+                                               breaks = c(0,12.5,25, 37.5, 50,62.5, 75,87.5, 100, Inf),
+                                               labels = c("[0,12.5)", "[12.5,25)","[25,37.5)", "[37.5,50)", "[50,62.5)", "[62.5, 75)", "[75,87.5)", "[87.5, 100)", "100"),
+                                               right  = FALSE))   %>%
+    na.omit()  
+ 
+
+
+```
+
+
+***
+
+
+# I. Introduction 
+
+
+Table 1.Sample for 5 randomly chosen countries of the data set used in this study
+```{r sample_table}
+
+Cases_filtered = tidy_joined_dataset %>%
+  dplyr::select(c(Country, Stringency_Index, Economic_Support_Index, Population2019, cumulative_confirmed_cases_per_10000, age15_64_population_prop_2019, nurses_midwives_per_1000_2018, Smoking_prevalence_15_2016, Economic_Support_Index_levels ))
+
+
+sample <- Cases_filtered %>% 
+  ungroup() %>%
+  sample_n(5)
+
+sample %>%
+    dplyr::select(c(Country, cumulative_confirmed_cases_per_10000, Stringency_Index, Economic_Support_Index, Economic_Support_Index_levels))
+
+
+sample %>%
+    dplyr::select(c(Country, Population2019, age15_64_population_prop_2019, nurses_midwives_per_1000_2018, Smoking_prevalence_15_2016 ))
+
+
+
+```
+
+
+
+***
+
+
+# II. Exploratory data analysis
+
+
+***
+Table 2: Summary for the cumulative confirmed cases per 10,000
+```{r summary_table}
+tidy_joined_dataset %>% 
+  ungroup() %>%
+  summarize(n = n(), 
+            min = min(cumulative_confirmed_cases_per_10000 , na.rm = T), 
+            median = median(cumulative_confirmed_cases_per_10000 , na.rm = T), 
+            mean = mean(cumulative_confirmed_cases_per_10000 , na.rm = T), 
+            max = max(cumulative_confirmed_cases_per_10000 , na.rm = T),
+            sd = sd(cumulative_confirmed_cases_per_10000 , na.rm = T)) 
+
+```
+
+
+```{r   D_CCPTTH, fig.cap = "Figure 1. Distribution for the cumulative confirmed cases per 10,000 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= cumulative_confirmed_cases_per_10000)) +
+  geom_histogram(bins = 20, fill = "#f9f906", color = "#ff6600") +
+  labs(x = "Cumulative confirmed cases per 10,000 individuals") +
+    theme_bw()
+
+
+```
+
+
+
+```{r   D_SI, fig.cap = "Figure 2. Distribution for the government response measured by the Stringency Index", fig.align = "center"}
+
+#bimodal, is this normally distributed
+ggplot(tidy_joined_dataset, aes(x= Stringency_Index)) +
+  geom_histogram(bins = 15, fill = "#f9f906", color = "#ff6600") +
+    labs(x = "Stringency Index") +
+    theme_bw()
+
+
+```
+
+```{r   D_ESI, fig.cap = "Figure 3. Distribution for the government response measured by the Economic Support Index", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x= Economic_Support_Index)) +
+  geom_histogram(fill = "#f9f906", color = "#ff6600") +
+  labs(x = "Economic Support Index") +
+    theme_bw()
+
+
+
+```
+
+```{r   D_APP, fig.cap = "Figure 4. Distribution for the Proportion of population that is 15-64 years old, in 2019 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= age15_64_population_prop_2019)) +
+  geom_histogram(bins = 20, fill = "purple", color = "#ff6600") +
+  labs(x = "Proportion of population that is 15-64 years old, in 2019") +
+    theme_bw()
+
+
+```
+
+
+
+```{r   D_NM, fig.cap = "Figure 5. Distribution for nurses and midwives per 1000 in 2018 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= nurses_midwives_per_1000_2018)) +
+  geom_histogram(bins = 20, fill = "purple", color = "#ff6600") +
+  labs(x = "nurses and midwives per 1000 in 2018") +
+    theme_bw()
+
+```
+
+
+```{r   D_SP, fig.cap = "Figure 6. Distribution for the Smoking Prevalence for 15+ years olds, in 2016 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= Smoking_prevalence_15_2016)) +
+  geom_histogram(bins = 20, fill = "purple", color = "#ff6600") +
+  labs(x = "Smoking Prevalence for 15+ years olds, in 2016") +
+    theme_bw()
+
+```
+
+
+```{r   SC_SI, fig.cap = "Figure 7.1. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their government response measured by the Stringency Index. The red line is the best fit line. The blue curve is the Loess curve.", fig.align = "center"}
+
+p1 <- ggplot(tidy_joined_dataset, aes(x= Stringency_Index, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Economic_Support_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#ffff00", high="#ff6600") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="blue") +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Stringency Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p1)
+
+```
+
+
+
+```{r  SI_SP_ESI, fig.cap = "Figure 7.2. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their government response measured by the Stringency Index, grouped by the Economic Support Index levels", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = Stringency_Index, y = cumulative_confirmed_cases_per_10000, size = Population2019, color = Economic_Support_Index_levels, label = Country)) +
+  geom_point(alpha = 0.3) +
+  scale_color_manual(values = c( "blue" , "mediumvioletred", "pink", "#B34DD8",  "mediumpurple1", "#FFA500", "green", "#FF4500", "#DC143C")) +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4) +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Stringency Index") +
+  theme_bw()
+```
+
+```{r  SI_SP_ESI_S, fig.cap = "Figure 7.3. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their government response measured by the Stringency Index, grouped and divided by the Economic Support Index levels", fig.align = "center"}
+
+
+
+ggplot(tidy_joined_dataset, aes(x = Stringency_Index, y = cumulative_confirmed_cases_per_10000, size = Population2019, color = Economic_Support_Index_levels, label = Country)) +
+  geom_point(alpha = 0.3) +
+  scale_color_manual(values = c( "orange" , "mediumvioletred", "#D56FA9", "#B34DD8",  "mediumpurple1", "#FFA500", "#FF8C00", "#FF4500", "#DC143C")) +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="blue") +  
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Stringency Index") +
+  theme_bw() +
+  facet_wrap(~Economic_Support_Index_levels)
+
+
+
+```
+
+```{r SP_ESI , fig.cap = "Figure 8. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their government response measured by the Economic Support Index. The red line is the best fit line. The blue curve is the Loess curve.", fig.align = "center"}
+
+p2 <- ggplot(tidy_joined_dataset, aes(x= Economic_Support_Index, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country)) +
+  geom_jitter(alpha = 0.4, width = 1.5, height = 0) +
+  scale_color_gradient(low="#ffff00", high="#ff6600") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="blue") +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Economic Support Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p2)
+
+```
+
+```{r   SC_APP, fig.cap = "Figure 9. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their Proportion of population that is 15-64 years old, in 2019. The red line is the best fit line. The blue curve is the Loess curve.", fig.align = "center"}
+
+p3_1 <- ggplot(tidy_joined_dataset, aes(x= age15_64_population_prop_2019, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#ffff00", high="purple") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="blue") +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Proportion of population that is 15-64 years old, in 2019") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p3_1)
+
+```
+
+```{r   SC_SP, fig.cap = "Figure 10. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their Smoking prevalence for 15+ year olds in 2016. The red line is the best fit line. The blue curve is the Loess curve.", fig.align = "center"}
+
+p4 <- ggplot(tidy_joined_dataset, aes(x= Smoking_prevalence_15_2016, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#ffff00", high="purple") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="blue") +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Smoking prevalence for 15+ year olds in 2016") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p4)
+
+```
+
+
+```{r   SC_SC, fig.cap = "Figure 11. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their Service coverage index in 2017. The red line is the best fit line. The blue curve is the Loess curve.", fig.align = "center"}
+
+
+p5 <- ggplot(tidy_joined_dataset, aes(x= nurses_midwives_per_1000_2018, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#ffff00", high="purple") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="blue") +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "nurses and midwives per 1000 in 2018") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p5)
+
+
+
+
+```
+
+
+```{r EI_boxplot_levels, fig.cap = "Figure 12. Boxplot of relationship between  the cumulative confirmed cases per 10,000 for individual countries and the Economic Support Index levels", fig.align = "center"}
+ggplot(tidy_joined_dataset, aes(x= Economic_Support_Index_levels, y=cumulative_confirmed_cases_per_10000)) +
+  geom_boxplot(fill = c( "orange" , "mediumvioletred", "#D56FA9", "#B34DD8",  "mediumpurple1", "#FFA500", "#FF8C00", "#FF4500", "#DC143C")) +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Economic Support Index levels") +
+  theme_bw()
+
+```
+
+
+
+
+***
+
+
+
+# III. Multiple linear regression
+
+## i. Methods
+
+
+***
+```{r updated_y}
+tidy_joined_dataset["cumulative_confirmed_cases_per_10000_transf"] <- (tidy_joined_dataset$cumulative_confirmed_cases_per_10000)^0.2
+
+```
+
+
+
+Will use the transformed Y, since the previous report showed non-normality in error terms and skewness.
+```{r   D_CCPTTH_t, fig.cap = "Figure 13. Distribution for the cumulative confirmed cases per 10,000 raised to 0.2, for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= cumulative_confirmed_cases_per_10000_transf)) +
+  geom_histogram(bins = 20, fill = "blue", color = "#ff6600") +
+  labs(x = "(Cumulative confirmed cases per 10,000 individuals)^0.2") +
+    theme_bw()
+
+
+```
+
+
+
+Table 3: Correlation matrix for the numeric variables in the study
+```{r corr_matrix, fig.align = "center"}
+
+
+filtered  <- tidy_joined_dataset %>%
+   ungroup() %>%
+     dplyr::select("cumulative_confirmed_cases_per_10000","cumulative_confirmed_cases_per_10000_transf", "Population2019", "Stringency_Index", "Economic_Support_Index", "age15_64_population_prop_2019" , "nurses_midwives_per_1000_2018", "Smoking_prevalence_15_2016")
+ 
+ # source("http://www.sthda.com/upload/rquery_cormat.r")
+ # rquery.cormat(filtered)
+# ggpairs(tidy_joined_dataset[,-1])
+
+
+ corr_mat <- cor(filtered)
+  kable(corr_mat, 
+        col.names = c('CCCPTTH', 'CCCPTTH^0.2', '2019 Population' , 'SI', 'ESI' , '15 to 64 y/o 2019 population proportion', 'NM 2018' , 'SP 2016'),
+        digits = 3)
+
+
+  # corrplot(corr_mat)
+```
+
+
+
+Using natural splines on the following model:
+$$
+\begin{aligned}\widehat{Y}_{CCPTTH}^{0.2} =& b_{0} + b_{SI} \cdot (x_1) + b_{ESI} \cdot (x_2) + b_{15to65 APP} \cdot (x_{3}) \\
+& + b_{NM,} \cdot (x_{4})  + b_{SP} \cdot (x_{12}) 
+\end{aligned} 
+$$
+
+
+```{r  primary_model}
+
+first_model = lm(cumulative_confirmed_cases_per_10000_transf ~  ns(Stringency_Index, knots = c(25,50,75)) + Economic_Support_Index + ns(age15_64_population_prop_2019, knots = c(67.5)) + ns(nurses_midwives_per_1000_2018, knots = c(10)) + Smoking_prevalence_15_2016, data = tidy_joined_dataset)
+
+
+first_model_6 = lm(cumulative_confirmed_cases_per_10000_transf ~  ns(Stringency_Index, knots = c(25,50,75)) + Economic_Support_Index_levels + ns(age15_64_population_prop_2019, knots = c(67.5)) + ns(nurses_midwives_per_1000_2018, knots = c(10)) + ns(Smoking_prevalence_15_2016, knots = c(21)), data = tidy_joined_dataset)
+
+
+# ols_plot_cooksd_chart(first_model)
+# ols_plot_dfbetas(first_model)
+# ols_plot_dffits(first_model)
+# ols_plot_resid_lev(first_model)
+
+# first_model_1 = lm(cumulative_confirmed_cases_per_10000 ~  ns(Stringency_Index, knots = c(25,50,75)) + Economic_Support_Index + ns(age15_64_population_prop_2019, knots = c(67.5)) + ns(nurses_midwives_per_1000_2018, knots = c(10)) + Smoking_prevalence_15_2016, data = tidy_joined_dataset)
+# 
+# 
+# transformation_test = MASS::boxcox(first_model_1)
+# lambda = transformation_test$x[which(transformation_test$y == max(transformation_test$y))]
+# lambda
+
+
+
+
+```
+
+
+```{r qqplots ,fig.cap= "Figure 14. Normal Q-Qplot for the model under discussion", fig.align = "center"}
+
+qqnorm(tidy_joined_dataset$cumulative_confirmed_cases_per_10000_transf, pch = 1, frame = TRUE) 
+qqline(tidy_joined_dataset$cumulative_confirmed_cases_per_10000_transf, col = "#e6005c", lwd = 2)
+
+```
+
+```{r rez_dis, fig.cap = "Figure 15. Residuals distribution for the statistical model", fig.align = "center"}
+
+regression_points <-  data.frame(resid(first_model))
+colnames(regression_points) <- "residuals"
+ggplot(regression_points, aes(x = residuals)) +
+  geom_histogram(bins = 20, color = "#ff9999", fill = "#e6005c")+
+  labs(x = "Residuals") +
+  theme_bw()
+
+```
+
+
+```{r rez_fv, fig.cap = "Figure 16. Residuals graph for the fitted values, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = predict(first_model), y = resid(first_model))) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "purple") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="blue") +
+  labs(y = "Residuals", x = "Fitted Values") +
+  theme_bw()
+
+```
+
+
+```{r rez_SI, fig.cap = "Figure 17. Residuals graph for the Stringency Index, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+rstandard_val <- rstandard(first_model)
+
+ggplot(tidy_joined_dataset, aes(x = Stringency_Index, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "purple") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="blue") +
+  labs(y = "rstandard", x = "Stringency Index") +
+  theme_bw()
+
+```
+
+
+```{r rez_ESI, fig.cap = "Figure 18. Residuals graph for the Economic Support Index, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"} 
+
+ggplot(tidy_joined_dataset, aes(x = Economic_Support_Index, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "purple") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="blue") +
+  labs(y = "rstandard", x = "Economic Support Index") +
+  theme_bw()
+
+```
+
+```{r rez_APP, fig.cap = "Figure 19. Residuals graph for the Proportion of population that is 15-64 years old, in 2019, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = age15_64_population_prop_2019, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "purple") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="blue") +
+  labs(y = "rstandard", x = "Proportion of population that is 15-64 years old, in 2019") +
+  theme_bw()
+
+
+```
+
+
+```{r rez_SP, fig.cap = "Figure 20. Residuals graph for the Smoking prevalence for 15+ year olds in 2016, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = Smoking_prevalence_15_2016, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "purple") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="blue") +
+  labs(y = "rstandard", x = "Smoking prevalence for 15+ year olds in 2016") +
+  theme_bw()
+
+
+```
+
+
+```{r rez_NM, fig.cap = "Figure 21. Residuals graph for the nurses and midwives per 1000 in 2018, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = nurses_midwives_per_1000_2018, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "purple") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="blue") +
+  labs(y = "rstandard", x = "nurses and midwives per 1000 in 2018") +
+  theme_bw()
+
+
+```
+
+
+Table 4: VIF table
+
+```{r   model_vifs, fig.cap = "Figure 7.1. VIF values", fig.align = "center"}
+
+car::vif(first_model)
+
+
+```
+
+
+## ii. Model Results
+
+***
+Table 5. Model Summary Table
+```{r   transf_model_summary}
+summary(first_model)
+
+```
+
+Table 6. ANOVA Table
+```{r   transf_anova_table}
+ anova(first_model)
+
+```
+
+Table 7. The 95% Confidence Intervals
+```{r transf_model_CI}
+kable(confint(first_model))
+
+```
+
+***
+
+## iii. Interpreting the regression table
+
+Our model is the following:
+
+$$
+\begin{aligned}\widehat{Y}_{CCPTTH}^{0.2} =& b_{0} + b_{SI,0-25} \cdot f_{1}(x_1) + b_{SI,25-50} \cdot f_{2}(x_1) + b_{SI,50-75} \cdot f_{3}(x_1) \\
+& + b_{SI,75-100} \cdot f_{4}(x_1) + b_{ESI} \cdot (x_2) + b_{15to65 APP,50-67.5} \cdot f_{5}(x_{3}) \\
+& + b_{15to65 APP,67.5-85} \cdot f_{6}(x_{3}) + b_{NM,0-10} \cdot f_{7}(x_{4}) \\
+& + b_{NM,10-20} \cdot f_{8}(x_{4}) + b_{SP} \cdot (x_{12}) \\
+ = & -0.124 + 0.8896 \cdot  f_{1}(x_1) + 1.518347 \cdot  f_{2}(x_1) + 2.2489 \cdot f_{3}(x_1) \\
+& + 1.1548 \cdot f_{4}(x_1) - 0.0028 \cdot (x_2) + 1.4553 \cdot  f_{5}(x_{3}) \\
+& + 0.9136 \cdot  f_{6}(x_{3}) + 1.756999 \cdot f_{7}(x_{4}) \\
+& + 1.12204 \cdot f_{8}(x_{4}) - 0.0121 \cdot (x_{12})
+\end{aligned} 
+$$
+
+$$\begin{aligned} H_0:&\beta_{0} = 0 \\\ \mbox{vs }H_A:& \beta_{0} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{SI, 0-25} = 0 \\\ \mbox{vs }H_A:& \beta_{SI, 0-25} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{SI, 25-50} = 0 \\\ \mbox{vs }H_A:& \beta_{SI, 25-50} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{SI, 50-75} = 0 \\\ \mbox{vs }H_A:& \beta_{SI,50-75} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{SI, 75-100} = 0 \\\ \mbox{vs }H_A:& \beta_{SI, 75-100} \neq 0 \end{aligned}$$
+
+$$\begin{aligned} H_0:&\beta_{ESI} = 0 \\\ \mbox{vs }H_A:& \beta_{ESI} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{15to65 APP, 50-67.5} = 0 \\\ \mbox{vs }H_A:& \beta_{15to65 APP, 50-67.5} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{15to65 APP, 67.5-80} = 0 \\\ \mbox{vs }H_A:& \beta_{15to65 APP, 67.5-80} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{NM, 0-10} = 0 \\\ \mbox{vs }H_A:& \beta_{NM, 0-10} \neq 0 \end{aligned}$$
+$$\begin{aligned} H_0:&\beta_{NM, 10-20} = 0 \\\ \mbox{vs }H_A:& \beta_{NM, 10-20} \neq 0 \end{aligned}$$
+
+$$\begin{aligned} H_0:&\beta_{SP} = 0 \\\ \mbox{vs }H_A:& \beta_{SP} \neq 0 \end{aligned}$$
+
+
+## iv. Inference for multiple regression
+
+
+
+```{r  spline_model_1, "Figure 22. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.2) for individual countries against their government response measured by the Stringency Index. The purple line is the spline, with its associated 95% CI and PI band.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+SI_lims = filtered %>%
+    select(Stringency_Index) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+SI_grid = seq(from = min(SI_lims), to = max(SI_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = SI_grid ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = SI_grid ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="confidence",
+               level=.95)
+
+
+# pred
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = Stringency_Index, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = SI_grid, y = pred[,"fit"]), color = "purple") +
+  geom_ribbon(aes(x = SI_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "purple") +
+  geom_ribbon(aes(x = SI_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "green")+
+  xlim(SI_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.2", x = "Stringency Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+
+
+
+
+```
+
+
+
+```{r  spline_model_1_NM,  "Figure 23. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.2) for individual countries against their nurses and midwives per 1000 in 2018. The purple line is the spline, with its associated 95% CI and PI band.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+NM_lims = filtered %>%
+    select(nurses_midwives_per_1000_2018) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+NM_grid = seq(from = min(NM_lims), to = max(NM_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = NM_grid,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = NM_grid,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="confidence",
+               level=.95)
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = nurses_midwives_per_1000_2018, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = NM_grid, y = pred[,"fit"]), color = "purple") +
+  geom_ribbon(aes(x = NM_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "purple") +
+  geom_ribbon(aes(x = NM_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "green")+
+  xlim(NM_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.2", x = "nurses and midwives per 1000 in 2018") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+```
+
+```{r  spline_model_1_APP,  "Figure 24. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.2) for individual countries against their Proportion of population that is 15-64 years old, in 2019. The purple line is the spline, with its associated 95% CI and PI band.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+APP_lims = filtered %>%
+    select(age15_64_population_prop_2019) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+APP_grid = seq(from = min(APP_lims), to = max(APP_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = APP_grid,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = APP_grid,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="confidence",
+               level=.95)
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = age15_64_population_prop_2019, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = APP_grid, y = pred[,"fit"]), color = "purple") +
+  geom_ribbon(aes(x = APP_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "purple") +
+  geom_ribbon(aes(x = APP_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "green") +
+  xlim(APP_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.2", x = "Proportion of population that is 15-64 years old, in 2019") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+```
+
+```{r  spline_model_1_SP,  "Figure 25. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.2) for individual countries against their Smoking prevalence for 15+ year olds in 2016. The purple line is the spline, with its associated 95% CI and PI band.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+SP_lims = filtered %>%
+    select(Smoking_prevalence_15_2016) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+SP_grid = seq(from = min(SP_lims), to = max(SP_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = SP_grid),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = SP_grid),
+               interval="confidence",
+               level=.95)
+
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = Smoking_prevalence_15_2016, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = SP_grid, y = pred[,"fit"]), color = "purple") +
+  geom_ribbon(aes(x = SP_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "purple") +
+   geom_ribbon(aes(x = SP_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "green") +
+  xlim(SP_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.2", x = "Smoking prevalence for 15+ year olds in 2016") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+```
+
+
+```{r  spline_model_1_ES,  "Figure 26. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.2) for individual countries against their government response measured by the Economic Support Index. The purple line is the spline, with its associated 95% CI and PI band.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+ES_lims = filtered %>%
+    select(Economic_Support_Index) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+ES_grid = seq(from = min(ES_lims), to = max(ES_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = ES_grid,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 50 ,
+                                   Economic_Support_Index = ES_grid,
+                                   age15_64_population_prop_2019 = 65,
+                                   nurses_midwives_per_1000_2018 = 5,
+                                   Smoking_prevalence_15_2016 = 25),
+               interval="confidence",
+               level=.95)
+
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = Economic_Support_Index, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Stringency_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = ES_grid, y = pred[,"fit"]), color = "purple") +
+  geom_ribbon(aes(x = ES_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "purple") +
+  geom_ribbon(aes(x = ES_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "green") +
+  xlim(ES_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.2", x = "Economic Support Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+```
+
+
+
+```{r  spline_model_2,  "Figure 27. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.2) for individual countries against their government response measured by the Stringency Index, where EI is categorical. The purple line is the spline, with its associated band.", fig.align = "center"}
+
+
+
+# # Get min/max values of SI using the range() function
+# SI_lims = filtered %>%
+#     select(Stringency_Index) %>%
+#     range
+# 
+# # Generate a sequence of SI values spanning the range
+# SI_grid = seq(from = min(SI_lims), to = max(SI_lims))
+# 
+# 
+# 
+# # Predict the value of the generated ages,
+# # returning the standard error using se = TRUE
+# pred = predict(first_model_6, newdata = data.frame(Stringency_Index = SI_grid ,
+#                                    Economic_Support_Index_levels = "[50,62.5)",
+#                                    age15_64_population_prop_2019 = 65,
+#                                    nurses_midwives_per_1000_2018 = 5,
+#                                    Smoking_prevalence_15_2016 = 25),
+#                # interval="prediction",
+#                level=.95,
+#                se = TRUE)
+# 
+# 
+# #Compute error bands (2*SE)
+# se_bands = with(pred, cbind("upper" = fit+2*se.fit,
+#                             "lower" = fit-2*se.fit))
+# 
+# 
+# # Plot the spline and error bands
+# 
+# p_6 <- ggplot() +
+#   geom_point(data = tidy_joined_dataset, aes(x = Stringency_Index, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+#   geom_line(aes(x = SI_grid, y = pred$fit), color = "purple") +
+#   geom_ribbon(aes(x = SI_grid,
+#                   ymin = se_bands[,"lower"],
+#                   ymax = se_bands[,"upper"]),
+#               alpha = 0.1) +
+#   xlim(SI_lims) +
+#   scale_color_gradient(low="#ffff00", high="brown") +
+#   labs(y = "(Cumu. confirmed cases per 10,000)^0.2", x = "Stringency Index") +
+#   theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+#         panel.grid.minor = element_line(colour = "#DCDCDC"),
+#         axis.line = element_line(colour = "black"),
+#         panel.background = element_blank(),
+#         panel.border = element_rect(colour = "black",
+#                                     fill=NA,
+#                                     size=0.5))
+# 
+# ggplotly(p_6)
+
+
+```
+
+
+
+
+Table 8. The 95% Prediction intervals for the cumulative confirmed cases per 10,000, where Stringency Index = 20, 50, 70, 90, respectively, for $(\text{cumulative confirmed cases per 10,000})^{0.2}$ = 2, economic support index = 50, population proportion of ages 15 to 64 in 2019 = 65, nurses midwives per 1000 in 2018 = 5, and Smoking prevalence for people ages 15+ in 2016 = 25.
+```{r transf_model_PI}
+
+indexes = c(20, 50, 70, 90)
+
+PI <- data.frame(predict(first_model, 
+              newdata=data.frame(cumulative_confirmed_cases_per_10000_transf = 2, 
+                                 Stringency_Index= indexes, 
+                                 Economic_Support_Index = 50,
+                                 age15_64_population_prop_2019 = 65,
+                                 nurses_midwives_per_1000_2018 = 5,
+                                 Smoking_prevalence_15_2016 = 25), 
+              interval="prediction", level=.95))
+PI$SI <- c(20, 50, 70, 90)
+PI <- PI %>%
+  dplyr::select(c(SI, fit, lwr, upr))  %>%
+  mutate(fit = fit^(1/0.2),
+         lwr = lwr^(1/0.2),
+         upr = upr^(1/0.2))
+
+colnames(PI) <- c("SI" , "Point Estimate" , "Lower Limit" , "Upper Limit")
+
+kable(PI,
+    digits = 5)
+
+```
+
+
+
+
+# IV. Discussion 
+
+## i. Conclusions
+
+
+
+## ii. Limitations
+
+
+
+## iii. Further questions
+
+
+
+***
+
+
+# V. Citations and References {-}

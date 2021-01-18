@@ -1,0 +1,1277 @@
+---
+title: "Predicting the Most Recent Number of Infected Individuals in Different Countries"
+author: "Catherine Al Aswad, Ali Alhakeem, Uyen Dao, Long Kim Long"
+date: " Last Updated 11/21/2020"
+output:
+  html_document:
+    fig_caption: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 2
+    df_print: kable
+    toc_float:
+      collapsed: no
+---
+
+```{r, include=FALSE}
+# Do not edit this code block/chunk
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning = FALSE, fig.width = 16/2.5, fig.height = 9/2.5)
+```
+
+
+```{r Packages}
+# Load all necessary packages here:
+library(tidyverse) 
+library(janitor)
+library(moderndive)
+library(here)
+library(knitr)
+library(readxl)
+library(tibbletime)    #to sort a variable of type 'date'
+library(MASS)    #for box-cox
+library(car)    #for vif and qqplot() and 3d graphs
+library(plotly)   # for interactive graphs
+library(olsrr)   # cook's distance
+library(GGally)    # ggpairs()
+library(corrplot)   #fancy correlation matrix
+library(splines)
+library(kableExtra)
+
+```
+
+```{r Wrangling}
+# data wrangling code:
+#reading in the code
+confirmed_cases <- read_csv(here("time_series_covid19_confirmed_global_2.csv"))
+indicator_data <- read_csv(here("indicator data 2.csv"))
+total_population <- read_xls(here("total_population.xls"))
+
+age_population_prop <- read_xls(here("age_group_population_proportion.xls"))
+nurses_midwives <- read_xls(here("nurses_and_midwives.xls"))
+Smoking_prevalence_15 <- read_xls(here("Smoking_prevalence_15+.xls"))
+
+
+
+## confirmed cases data set
+# selecting the columns we need
+# pivoting the table to tidy it
+confirmed_cases_tidy <- confirmed_cases %>%
+    dplyr::select(-c("Province/State", "Lat", "Long")) %>%
+    pivot_longer(names_to = "date",    
+               values_to = "cumulative_confirmed_cases", 
+               cols = -"Country/Region" ) 
+
+# changing column names (doing it early because a name with / without "" causes problems later)
+colnames(confirmed_cases_tidy) <- c("Country" , "Date" , "cumulative_confirmed_cases")
+
+# Taking the sum of confirmed cases of all the regions in a country; before, the cases were per region in each country, we are summing them to get total per country, irrelevant of region
+# Changed the date and country type, so that it is not hard to join them later
+# filter the data for the date we want: 2020-10-23, the earliest day for doing the study (known before starting the analysis)
+confirmed_cases_tidy <- confirmed_cases_tidy %>%
+    group_by(Country, Date) %>%
+    summarise(cumulative_confirmed_cases = sum(cumulative_confirmed_cases)) %>%    
+    mutate(Date = as.Date(Date, format = "%m/%d/%y"),
+           Country = as.factor(Country)) %>%
+    arrange(Date) %>%
+    as_tbl_time(index = Date) %>%
+    filter_time(time_formula = ~ '2020-10-23')   
+
+# Some countries are referred to differently in each data set, so we fixed their names to be consistent, so some country data is not lost. The countries whose alternative names are not obvious where searched to make sure that they are correct. 
+# The code commented out below was used to check for inconsistent country names:
+# setdiff(unique(total_population_tidy$Country),unique(indicator_data_tidy$Country))
+# setdiff(unique(indicator_data_tidy$Country),unique(total_population_tidy$Country))
+# 
+# setdiff(unique(total_population_tidy$Country),unique(confirmed_cases_tidy$Country))
+# setdiff(unique(confirmed_cases_tidy$Country),unique(total_population_tidy$Country))
+# 
+# setdiff(unique(indicator_data_tidy$Country), unique(confirmed_cases_tidy$Country))
+# setdiff(unique(confirmed_cases_tidy$Country), unique(indicator_data_tidy$Country))
+
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="US"] = "United States"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Taiwan*"] = "Taiwan"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Burma"] = "Myanmar"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Korea, South"] = "Republic of Korea (South)"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Slovakia"] = "Slovak Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Czechia"] = "Czech Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Congo (Brazzaville)"] = "The Republic of Congo"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Congo (Kinshasa)"] = "The Democratic Republic of Congo"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Kyrgyzstan"] = "Kyrgyz Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Iran"] = "Islamic Republic of Iran"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Syria"] = "Syrian Arab Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Russia"] = "Russian Federation"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Egypt"] = "Arab Republic of Egypt"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Yemen"] = "Republic of Yemen"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Venezuela"] = "Venezuela, RB"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Brunei"] = "Brunei Darussalam"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Laos"] = "Lao People's Democratic Republic"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Saint Kitts and Nevis"] = "St. Kitts and Nevis"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Saint Vincent and the Grenadines"] = "St. Vincent and the Grenadines"
+levels(confirmed_cases_tidy$Country)[levels(confirmed_cases_tidy$Country)=="Saint Lucia"] = "St. Lucia"
+
+
+
+
+## indicator data set
+# removed the first row which are the column titles
+# selected the columns we want ( we knew in advance which indices we will use)
+# changed the date and country type to facilitate joining them later
+# took the average index for a country (we have regional indices, but we want it for the entire country)
+# filtered the data for the date we want (known before starting the analysis)
+indicator_data_tidy <- indicator_data[-1,] %>%
+   dplyr::select("CountryName", "Date", "StringencyIndex", "EconomicSupportIndex") %>%
+   mutate(Date = as.Date(Date, format = "%Y%m%d"),
+          CountryName = as.factor(CountryName)) %>%
+   group_by(CountryName, Date) %>%
+   summarise(StringencyIndex = mean(StringencyIndex, na.rm=TRUE),
+             EconomicSupportIndex = mean(EconomicSupportIndex, na.rm = TRUE)) %>%
+   arrange(Date) %>%
+   as_tbl_time(index = Date) %>%
+   filter_time(time_formula = ~ '2020-06-15')   
+
+# Changed the column names
+colnames(indicator_data_tidy) <- c("Country" , "Date" ,  "Stringency_Index", "Economic_Support_Index")
+
+# Some countries are referred to differently in each data set, so we fixed their names to be consistent, so some country data is not lost. The countries whose alternative names are not obvious where searched to make sure that they are correct. 
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Cape Verde"] = "Cabo Verde"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Palestine"] = "West Bank and Gaza"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Congo"] = "The Republic of Congo"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Democratic Republic of Congo"] =  "The Democratic Republic of Congo"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Iran"] = "Islamic Republic of Iran"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Syria"] = "Syrian Arab Republic"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Hong Kong"] = "Hong Kong SAR, China"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Russia"] = "Russian Federation"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="South Korea"] = "Republic of Korea (South)"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Egypt"] = "Arab Republic of Egypt"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Yemen"] = "Republic of Yemen"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Venezuela"] = "Venezuela, RB"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Brunei"] = "Brunei Darussalam"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Laos"] = "Lao People's Democratic Republic"
+levels(indicator_data_tidy$Country)[levels(indicator_data_tidy$Country)=="Macao"] = "Macao SAR, China"
+
+
+
+#population data set
+# removed first 3 rows: an entirely empty row, the title row, and a row not about a country
+# selected the columns we want: using 2019 population (...64) because 2020 population (...65) is not available  
+# there is a line for 'Not classified' data source and is the only one with an na population in 2019; removed it
+# fixed data types
+total_population_tidy <- total_population[-c(1:3),] %>%  
+  dplyr::select("Data Source", "...64") %>% 
+  na.omit() %>%  
+  mutate(...64 = as.double(...64))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(total_population_tidy) <- c("Country" , "Population2019")
+
+# fixed the country type so the join works
+total_population_tidy <- total_population_tidy %>%
+  mutate(Country = as.factor(Country))       
+
+# Some countries are referred to differently in each data set, so we fixed their names to be consistent, so some country data is not lost. The countries whose alternative names are not obvious where searched to make sure that they are correct. 
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)== "Virgin Islands (U.S.)"] = "United States Virgin Islands"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Iran, Islamic Rep."] = "Islamic Republic of Iran"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Gambia, The"] = "Gambia"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(total_population_tidy$Country)[levels(total_population_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+
+
+## age_population_prop data set:   			percent of population with ages 15-64
+age_population_prop_tidy <- age_population_prop[-c(1:3),] %>% 
+  dplyr::select("Data Source", "...64") %>% 
+  na.omit() %>%  
+  mutate(...64 = as.double(...64))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(age_population_prop_tidy) <- c("Country" , "age15_64_population_prop_2019")
+
+# fixed the country type so the join works
+age_population_prop_tidy <- age_population_prop_tidy %>%
+  mutate(Country = as.factor(Country)) 
+
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)== "Virgin Islands (U.S.)"] = "United States Virgin Islands"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Iran, Islamic Rep."] = "Islamic Republic of Iran"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Gambia, The"] = "Gambia"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(age_population_prop_tidy$Country)[levels(age_population_prop_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+
+
+## nurses_midwives data set:   		Nurses and midwives (per 1,000 people)
+nurses_midwives_tidy <- nurses_midwives[-c(1:3),] %>% 
+  dplyr::select("Data Source", "...63") %>% 
+  na.omit() %>%  
+  mutate(...63 = as.double(...63))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(nurses_midwives_tidy) <- c("Country" , "nurses_midwives_per_1000_2018")
+
+# fixed the country type so the join works
+nurses_midwives_tidy <- nurses_midwives_tidy %>%
+  mutate(Country = as.factor(Country)) 
+
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(nurses_midwives_tidy$Country)[levels(nurses_midwives_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+
+## Smoking_prevalence_15 data set:   			 Total smoking prevalence (ages 15+) ages 15+
+Smoking_prevalence_15_tidy <- Smoking_prevalence_15[-c(1:3),] %>% 
+  dplyr::select("Data Source", "...61") %>% 
+  na.omit() %>%  
+  mutate(...61 = as.double(...61))
+
+# changed column names; did this early since a name with a space causes problems in the code if there is no ""
+colnames(Smoking_prevalence_15_tidy) <- c("Country" , "Smoking_prevalence_15_2016")
+
+# fixed the country type so the join works
+Smoking_prevalence_15_tidy <- Smoking_prevalence_15_tidy %>%
+  mutate(Country = as.factor(Country)) 
+
+
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Congo, Rep."] = "The Republic of Congo"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Congo, Dem. Rep."] =  "The Democratic Republic of Congo"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Iran, Islamic Rep."] = "Islamic Republic of Iran"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Korea, Rep."] = "Republic of Korea (South)"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Egypt, Arab Rep."] = "Arab Republic of Egypt"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Yemen, Rep."] = "Republic of Yemen"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Gambia, The"] = "Gambia"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Lao PDR"] = "Lao People's Democratic Republic"
+levels(Smoking_prevalence_15_tidy$Country)[levels(Smoking_prevalence_15_tidy$Country)=="Bahamas, The"] = "Bahamas"
+
+
+
+
+## final joint data set
+# did the join by country
+# created our dependent variable (there is no population of zero when dividing, and neither variable used has missing values)
+# removed missing values
+# created a column for ESI as a categorical variable
+ tidy_joined_dataset <-  indicator_data_tidy %>%
+    inner_join(confirmed_cases_tidy, by = c ("Country")) %>%
+    inner_join(total_population_tidy, by = c ("Country")) %>%
+    inner_join(age_population_prop_tidy, by = c ("Country")) %>%
+    inner_join(nurses_midwives_tidy, by = c ("Country")) %>%
+    inner_join(Smoking_prevalence_15_tidy, by = c ("Country")) %>%
+    mutate(cumulative_confirmed_cases_per_10000 = (cumulative_confirmed_cases/Population2019)*10000,
+           Economic_Support_Index_levels = cut(Economic_Support_Index, 
+                                               breaks = c(0,12.5,25, 37.5, 50,62.5, 75,87.5, 100, Inf),
+                                               labels = c("[0,12.5)", "[12.5,25)","[25,37.5)", "[37.5,50)", "[50,62.5)", "[62.5, 75)", "[75,87.5)", "[87.5, 100)", "100"),
+                                               right  = FALSE))   %>%
+    na.omit()  
+ 
+
+
+```
+
+
+***
+
+
+# I. Introduction
+
+Amid the Coronavirus Disease pandemic in 2020, governments around the world developed a response to aid the citizens of their countries and mitigate the spread of the Severe Acute Respiratory Syndrome Coronavirus 2. This study aims to predict the most recent cumulative number of confirmed cases of COVID-19 in different countries, per 10,000 individuals (on the 23rd of October 2020), using the past government responses in these countries to the outbreak (set on the 15th of June 2020), with some other World Bank indicators of interest. This study builds upon the findings of the previous research (project 2) by considering a nonlinear model.
+ 
+The data used in this study is obtained from The Humanitarian Data Exchange data portal and includes the total population for each country in 2019^[“Total Population” World Bank Indicators of Interest to the COVID-19 Outbreak. COVID-19 Pandemic. _ World Bank_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed October 2020 https://data.humdata.org/dataset/world-bank-indicators-of-interest-to-the-covid-19-outbreak], the cumulative number of confirmed cases of COVID-19 in different countries^[“time_series_covid19_confirmed_global.csv” Novel Coronavirus (COVID-19) Cases Data. COVID-19 Pandemic. _Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE)_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed October 2020 https://data.humdata.org/dataset/novel-coronavirus-2019-ncov-cases] on the 23rd of October 2020,  the Stringency and Economic Support indices on the 15th of June 2020^[“OxCGRT_CSV” OXFORD COVID-19 Government Response Stringency index, COVID-19 Pandemic. _The Oxford COVID-19 Government Response Tracker_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed October 2020 https://data.humdata.org/dataset/oxford-covid-19-government-response-tracker], the total smoking prevalence of people ages 15 and above in 2016^[“Health - Smoking prevalence, total, ages 15+” World Bank Indicators of Interest to the COVID-19 Outbreak. COVID-19 Pandemic. _ World Bank_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed November 2020 https://data.humdata.org/dataset/world-bank-indicators-of-interest-to-the-covid-19-outbreak], the number of nurses and midwives per 1,000 people in 2018^[“Health - Nurses and midwives (per 1,000 people)” World Bank Indicators of Interest to the COVID-19 Outbreak. COVID-19 Pandemic. _ World Bank_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed November 2020 https://data.humdata.org/dataset/world-bank-indicators-of-interest-to-the-covid-19-outbreak], and the percentage of population that consists of people ages 15 to 64 in 2019^[“Age and Population - Population ages 15-64 (% of total population))” World Bank Indicators of Interest to the COVID-19 Outbreak. COVID-19 Pandemic. _ World Bank_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed November 2020 https://data.humdata.org/dataset/world-bank-indicators-of-interest-to-the-covid-19-outbreak].
+ 
+When comparing the number of infected individuals across countries, the population size of these countries need to be considered. So, the study will look at the cumulative number of confirmed cases of COVID-19 collected on the 23rd of October 2020 in different countries, per 10,000 individuals, and is calculated as: $\frac{\text{cumulative cases in the country}}{\text{total population of the country}} \cdot 10,000$. This variable and date are the same as those in Project 2, since the aim is to analyse the same cumulative number of confirmed cases data, but with a different approach.
+ 
+It was shown in Project 2 that the continuous variables Stringency Index and Economic Support Index, on the 15th of June 2020, are adequate variables that have a relationship with the cumulative number of confirmed cases of COVID-19 per 10,000 collected on the 23rd of October 2020. So, these two indexes will be included in this study to quantify the government response to the outbreak. The Stringency index accounts for closure, containment, and public health measures.  The  Economic Support index accounts for the economic response taken by the governments. Note that the data used provides different government responses for different regions within certain countries, for example the United States of America. Since this study is looking at a country as a whole, the average government response of a country on the 15th of June 2020 will be used, by taking the average government response of all its regions on that day. The data on the 15th of June 2020 was used, just as in Project 2, since the same relationship between the cumulative number of confirmed cases and government response is being analysed, but with a different approach and in addition to other predictor variables.
+ 
+Three other predictor variables were chosen to be used in this study. The total smoking prevalence of people ages 15 and above is considered, since smoking involves having a possibly contaminated surface (hand, ashtray,..) come in contact with a mucous membrane (mouth), which is how SARS Coronavirus 2 mainly spreads.^[“Coronavirus disease(COVID-19): Prevention and risks.” Government of Canada. Accessed: November 2020
+https://www.canada.ca/en/public-health/services/diseases/2019-novel-coronavirus-infection/prevention-risks.html] This variable has no data for ages below 15, but that may not be an issue, since it is less likely to have smokers below 15 years old. The earliest data available is from 2016, so that is what will be analysed. The number of nurses and midwives per 1,000 people in 2018 (earliest data available) is also considered, since nurses are in contact with sick or infected individuals with low immunity, which includes identified and non-identified covid 19 patients. Nurses may accidentally fail to take proper precautions to prevent the spread of the disease from one patient to another, so they play a key role in the spread of the virus. The percentage of the population that consists of people ages 15 to 64 in 2019 (earliest data available) is also considered, since people in this age group are in contact with more people than children and retired individuals, due to college, university, work, socializing opportunities, etc.
+ 
+Other World Bank indicators were available to choose from, but it was decided not to use them. Some reasons that led to that decision were that the earliest data available is from 2013 or before (proportion of population spending^[“Health - Proportion of population spending” World Bank Indicators of Interest to the COVID-19 Outbreak. COVID-19 Pandemic. _ World Bank_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed November 2020 https://data.humdata.org/dataset/world-bank-indicators-of-interest-to-the-covid-19-outbreak], etc.); some of the variables have more to do with the number of deaths rather than the spread of the disease (percent of death in a year caused by communicable diseases^[“Health - Cause of Death, by communicable diseases” World Bank Indicators of Interest to the COVID-19 Outbreak. COVID-19 Pandemic. _ World Bank_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed November 2020 https://data.humdata.org/dataset/world-bank-indicators-of-interest-to-the-covid-19-outbreak], etc.); and other variables for which we could not find a logical method to relate them to the increase in number of infected individuals (Hospital beds^[“Health - Hospital beds per 1,000 people” World Bank Indicators of Interest to the COVID-19 Outbreak. COVID-19 Pandemic. _ World Bank_. United Nations Office for the Coordination of Humanitarian Affairs. 2020. Accessed November 2020 https://data.humdata.org/dataset/world-bank-indicators-of-interest-to-the-covid-19-outbreak], etc).
+ 
+After organizing the data and removing countries with missing values, 78 countries remain represented in the dataset, out of the 195 countries in the world (approximately 40%)^[“How many Countries are there in the World?”, Worldometer, 2020. Accessed October 2020 https://www.worldometers.info/geography/how-many-countries-are-there-in-the-world/]. That is about 46.7% of the data used in Project 2, which included 167 countries.
+
+```{r sample_table}
+
+Cases_filtered = tidy_joined_dataset %>%
+  dplyr::select(c(Country, Stringency_Index, Economic_Support_Index, Population2019, cumulative_confirmed_cases_per_10000, age15_64_population_prop_2019, nurses_midwives_per_1000_2018, Smoking_prevalence_15_2016, Economic_Support_Index_levels ))
+
+
+sample <- Cases_filtered %>% 
+  ungroup() %>%
+  sample_n(5)
+
+sample %>%
+    dplyr::select(c(Country, cumulative_confirmed_cases_per_10000, Stringency_Index, Economic_Support_Index, Economic_Support_Index_levels)) %>%
+  kable(caption = "Table 1.Sample for 5 randomly chosen countries of the data set used in this study") %>%
+  kable_styling(full_width = F)
+
+
+
+sample %>%
+    dplyr::select(c(Country, Population2019, age15_64_population_prop_2019, nurses_midwives_per_1000_2018, Smoking_prevalence_15_2016 ))  %>%
+  kable() %>%
+  kable_styling(full_width = F)
+
+
+
+```
+
+
+
+***
+
+
+# II. Exploratory data analysis
+
+
+***
+```{r summary_table}
+tidy_joined_dataset %>% 
+  ungroup() %>%
+  summarize(n = n(), 
+            min = min(cumulative_confirmed_cases_per_10000 , na.rm = T), 
+            median = median(cumulative_confirmed_cases_per_10000 , na.rm = T), 
+            mean = mean(cumulative_confirmed_cases_per_10000 , na.rm = T), 
+            max = max(cumulative_confirmed_cases_per_10000 , na.rm = T),
+            sd = sd(cumulative_confirmed_cases_per_10000 , na.rm = T))  %>%
+  kable(caption = "Table 2: Summary for the cumulative confirmed cases per 10,000") %>%
+  kable_styling(full_width = F)
+
+```
+
+Our total sample size was 78 (Table 2). The mean cumulative confirmed cases (CCC) per 10,000 is about 67.20, far greater than our median 27.50, indicating that our CCC distribution is heavily right-skewed, which can easily be observed in Figure 1. This is to be expected for the lowest CCC possible is 0 whereas there is no such bound for the highest number. Most countries have their CCC within the 300-mark, we also notice the existence of some very extreme outliers around the 450-mark.   
+
+
+```{r   D_CCPTTH, fig.cap = "Figure 1. Distribution for the cumulative confirmed cases per 10,000 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= cumulative_confirmed_cases_per_10000)) +
+  geom_histogram(bins = 20, fill = "#f9f906", color = "#6109de", alpha = 0.7) +
+  labs(x = "Cumulative confirmed cases per 10,000 individuals") +
+    theme_bw()
+
+
+```
+
+The distribution of the Stringency Index (Figure 2), which measures government response, seems to resemble a bell shape although there is a slight skew on the left tail. The Economic Support Index distribution (Figure 3), which records measures such as income support and debt relief, also seems to be a bit left-skewed. We notice that the distribution looks bimodal at 50 and 75, but suspect that could be due to rounding. In figure 4, the proportion of population does seem slightly left skewed, with 2 outliers around the 85-mark but they do not seem too extreme or influential. Figure 5 shows an extremely right-skewed distribution of nurses and midwives. Finally, smoking prevalence for 15+ years olds looks reasonably normally distributed.
+
+
+
+```{r   D_SI, fig.cap = "Figure 2. Distribution for the government response measured by the Stringency Index", fig.align = "center"}
+
+#bimodal, is this normally distributed
+ggplot(tidy_joined_dataset, aes(x= Stringency_Index)) +
+  geom_histogram(bins = 15, fill = "#f9f906", color = "#6109de", alpha = 0.7) +
+    labs(x = "Stringency Index") +
+    theme_bw()
+
+
+```
+
+```{r   D_ESI, fig.cap = "Figure 3. Distribution for the government response measured by the Economic Support Index", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x= Economic_Support_Index)) +
+  geom_histogram(fill = "#f9f906", color = "#6109de", alpha = 0.7) +
+  labs(x = "Economic Support Index") +
+    theme_bw()
+
+
+
+```
+
+```{r   D_APP, fig.cap = "Figure 4. Distribution for the Proportion of population that is 15-64 years old, in 2019 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= age15_64_population_prop_2019)) +
+  geom_histogram(bins = 20, fill = "#f9f906", color = "#6109de", alpha = 0.7) +
+  labs(x = "Proportion of population that is 15-64 years old, in 2019") +
+    theme_bw()
+
+
+```
+
+
+
+```{r   D_NM, fig.cap = "Figure 5. Distribution for nurses and midwives per 1000 in 2018 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= nurses_midwives_per_1000_2018)) +
+  geom_histogram(bins = 20, fill = "#f9f906", color = "#6109de", alpha = 0.7) +
+  labs(x = "nurses and midwives per 1000 in 2018") +
+    theme_bw()
+
+```
+
+
+```{r   D_SP, fig.cap = "Figure 6. Distribution for the Smoking Prevalence for 15+ years olds, in 2016 for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= Smoking_prevalence_15_2016)) +
+  geom_histogram(bins = 20, fill = "#f9f906", color = "#6109de", alpha = 0.7) +
+  labs(x = "Smoking Prevalence for 15+ years olds, in 2016") +
+    theme_bw()
+
+```
+
+
+In figure 7.1, the scatterplot shows that there seems so be some correlation between the cumulative confirmed cases per 10,000 (CCC) and the Stringency Index, which suggests that, without implying any causal effect, countries with a higher number of cases per 10,000 tend to also have strict policies on pandemic response. It is worth noting that there exist outliers (we consider the one that passes the 400-mark of CCC) that might have more influence on the best fit line. We also included a Loess curve, and it implies an upward trend, before dropping (but please also be cautious about the effect of overfitting). We also notice that for the cases of (almost) 0 CCC for many countries, the response (Stringency Index) diverses the most (from 0 to 100) compared to other levels, with more points clustering in the [50,75] range. This diversity is also true for Economic Support, which suggests that countries with very low CCC also spend a variable amount on income support and debt relief packages. However, countries that have more CCC definitely tend to spend more on said packages.
+
+```{r   SC_SI, fig.cap = "Figure 7.1. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their government response measured by the Stringency Index. The red line is the best fit line. The blue curve is the Loess curve. The vertical black lines indicate the chosen knot locations at the 5th percentile SI = 36.1100, 35th percentile SI = 61.0640, 65th percentile SI= 77.3335, 95th percentile SI= 92.7295", fig.align = "center"}
+
+
+sorted <- tidy_joined_dataset%>%
+  arrange(Stringency_Index) 
+
+
+quantile_1 <- quantile(tidy_joined_dataset$Stringency_Index, probs = c(5, 35,65, 95)/100)
+
+
+p1 <- ggplot(tidy_joined_dataset, aes(x= Stringency_Index, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Economic_Support_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#bfeb14", high="#ff6600") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="#3080cf", fill = "#3080cf", alpha = 0.1) +
+  geom_vline(xintercept = c(quantile_1[1], quantile_1[2], quantile_1[3], quantile_1[4]),  size = 0.3, colour= "black", linetype="dotted") +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Stringency Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p1)
+
+
+```
+
+
+The scatter plot in Figure 7.2 for the CCC against Stringency Index grouped by ESI shows drastically different slopes for each interval of ESI, which suggests complex behaviors of the data, which can be better observed in figure 12.  
+
+
+```{r  SI_SP_ESI, fig.cap = "Figure 7.2. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their government response measured by the Stringency Index, grouped by the Economic Support Index levels", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = Stringency_Index, y = cumulative_confirmed_cases_per_10000, color = Economic_Support_Index_levels, size = Population2019, label = Country)) +
+  geom_point(alpha = 0.3) +
+  scale_color_manual(values = c( "blue" , "mediumvioletred", "pink", "#B34DD8",  "mediumpurple1", "#FFA500", "green", "#FF4500", "#DC143C")) +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4) +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Stringency Index") +
+  theme_bw()
+```
+
+
+The scatter plot in Figure 8 for the CCC against Economic Support Index has more points on the bottom and fewer at the top. This implies that countries with lower cases per 10,000 individuals tend to spend less on economic relief packages. 
+
+```{r SP_ESI , fig.cap = "Figure 8. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their government response measured by the Economic Support Index. The red line is the best fit line. The blue curve is the Loess curve.", fig.align = "center"}
+
+p2 <- ggplot(tidy_joined_dataset, aes(x= Economic_Support_Index, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country)) +
+  geom_jitter(alpha = 0.4, width = 1.5, height = 0) +
+  scale_color_gradient(low="#bfeb14", high="#ff6600") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.5, colour="#3080cf", fill = "#3080cf", alpha = 0.1) +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Economic Support Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p2)
+
+```
+
+
+Figure 9, 10, 11 shows the scatterplots of CCC against the proportion of population that is 15-64 years old, the smoking prevalence of 15+ years old, and nurses and midwives per 1,000. All except smoking prevalence shows some relationship between CCC and the respective predictor.
+
+
+```{r   SC_APP, fig.cap = "Figure 9. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their Proportion of population that is 15-64 years old, in 2019. The red line is the best fit line. The blue curve is the Loess curve. The vertical black lines indicate the chosen knot locations at the 5th percentile APP = 53.54730, 35th percentile APP = 62.88236, 65th percentile APP = 65.88236, 95th percentile APP = 72.63432.", fig.align = "center"}
+
+
+sorted <- tidy_joined_dataset%>%
+  arrange(age15_64_population_prop_2019) 
+
+quantile_2 <- quantile(tidy_joined_dataset$age15_64_population_prop_2019, probs = c(5, 35,65, 95)/100)
+
+p3_1 <- ggplot(tidy_joined_dataset, aes(x= age15_64_population_prop_2019, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#bfeb14", high="#ff6600") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="#3080cf", fill = "#3080cf", alpha = 0.1) +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Proportion of population that is 15-64 years old, in 2019") +
+  geom_vline(xintercept = c(quantile_2[1], quantile_2[2], quantile_2[3], quantile_2[4]),  size = 0.3, colour= "black", linetype="dotted") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p3_1)
+
+
+```
+
+
+```{r   SC_SP, fig.cap = "Figure 10. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their Smoking prevalence for 15+ year olds in 2016. The red line is the best fit line. The blue curve is the Loess curve.", fig.align = "center"}
+
+p4 <- ggplot(tidy_joined_dataset, aes(x= Smoking_prevalence_15_2016, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#bfeb14", high="#ff6600") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="#3080cf", fill = "#3080cf", alpha = 0.1) +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Smoking prevalence for 15+ year olds in 2016") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p4)
+
+```
+
+
+```{r   SC_SC, fig.cap = "Figure 11. Interactive Scatterplot for the cumulative confirmed cases per 10,000 for individual countries against their nurses and midwives per 1000 in 2018. The red line is the best fit line. The blue curve is the Loess curve. The vertical black lines indicate the chosen knot locations at the 5th percentile NM = 0.434670, 35th percentile NM = 1.654765, 65th percentile NM = 4.196680, 95th percentile NM = 12.579690.", fig.align = "center"}
+
+
+sorted <- tidy_joined_dataset%>%
+  arrange(nurses_midwives_per_1000_2018) 
+
+quantile_3 <- quantile(tidy_joined_dataset$nurses_midwives_per_1000_2018, probs = c(5, 35,65, 95)/100)
+
+
+p5 <- ggplot(tidy_joined_dataset, aes(x= nurses_midwives_per_1000_2018, y= cumulative_confirmed_cases_per_10000, size = Population2019, color = Stringency_Index, label = Country )) +
+  geom_point(alpha = 0.4) +
+  scale_color_gradient(low="#bfeb14", high="#ff6600") +
+  geom_smooth(method = "lm", se = FALSE, size = 0.4, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.4, colour="#3080cf", fill = "#3080cf", alpha = 0.1) +
+  geom_vline(xintercept = c(quantile_3[1], quantile_3[2], quantile_3[3], quantile_3[4]),  size = 0.3, colour= "black", linetype="dotted") +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "nurses and midwives per 1000 in 2018") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, 
+                                    size=0.5))
+
+ggplotly(p5)
+
+
+```
+
+
+```{r EI_boxplot_levels, fig.cap = "Figure 12. Boxplot of relationship between  the cumulative confirmed cases per 10,000 for individual countries for the Economic Support Index levels", fig.align = "center"}
+ggplot(tidy_joined_dataset, aes(x= Economic_Support_Index_levels, y=cumulative_confirmed_cases_per_10000)) +
+  geom_boxplot(fill = c( "#f1f906" , "#e9df16", "#ecf00f", "#d8dc23",  "#d5b02a", "#e4a01b", "#f39e0c", "#e87b17", "#f1630e")) +
+  labs(y = "Cumu. confirmed cases per 10,000", x = "Economic Support Index levels") +
+  theme_bw()
+
+```
+
+
+
+
+***
+
+
+
+# III. Multiple linear regression
+
+## i. Methods
+
+
+***
+
+The last paragraph implied that the slope changes intensely for different intervals of Economic Support Index, thus we recognize that a linear model might not be the best model to capture this complex behavior of the given data, so we decided to make use of the natural spline model. We’ve chosen the knots based on the density of the data distribution in a way that makes sure each interval has a similar amount of points.
+
+Since the exploratory part shows that the distribution of our Y variable is extremely right-skewed and has many influential outliers, we have decided that it is in our best interest to transform the data to get rid of this problem. We also recognize the danger of overfitting, so unlike the last project, we will not be using box-cox to optimize the transformation (for this set of data), but rather go with a more “natural” type of transformation: taking the square root.
+
+
+```{r updated_y}
+
+tidy_joined_dataset["cumulative_confirmed_cases_per_10000_transf"] <- (tidy_joined_dataset$cumulative_confirmed_cases_per_10000)^0.5
+
+```
+
+
+
+```{r   D_CCPTTH_t, fig.cap = "Figure 13. Distribution for the cumulative confirmed cases per 10,000 raised to 0.5, for individual countries ", fig.align = "center"}
+
+ggplot(tidy_joined_dataset,  aes(x= cumulative_confirmed_cases_per_10000_transf)) +
+  geom_histogram(bins = 20, color = "#f9f906", fill = "#ff6600", alpha = 0.7) +
+  labs(x = "(Cumulative confirmed cases per 10,000 individuals)^0.5") +
+    theme_bw()
+
+
+```
+
+
+
+
+Using the following model: 
+
+```{r  primary_model}
+
+first_model = lm(cumulative_confirmed_cases_per_10000_transf ~  ns(Stringency_Index, knots = c(36.1100, 61.0640, 77.3335, 92.7295)) + Economic_Support_Index + ns(age15_64_population_prop_2019, knots = c(53.54730, 62.88236, 65.88236, 72.63432 )) + ns(nurses_midwives_per_1000_2018, knots = c( 0.434670,  1.654765,  4.196680, 12.579690 )) + Smoking_prevalence_15_2016, data = tidy_joined_dataset)
+
+summary(first_model)$call
+
+
+
+```
+
+
+From figure 14 - 21, we observe that, though not perfect, the plots has shown more promising results: the distribution of error terms is more bell-shaped, the normal Q-Q plot shows an almost straight line, and the residual scatter plots (figure 16, 17, 18, 19, 20, 21) are cloud-shaped. We may conclude that the transformation has allowed our assumptions about the model to be reasonably met in order to proceed with our analysis.
+
+
+
+```{r qqplots ,fig.cap= "Figure 14. Normal Q-Qplot for the cumulative number of confirmed cases per 10000, raised to 0.5", fig.align = "center"}
+
+qqnorm(tidy_joined_dataset$cumulative_confirmed_cases_per_10000_transf, pch = 1, frame = TRUE) 
+qqline(tidy_joined_dataset$cumulative_confirmed_cases_per_10000_transf, col = "#3080cf", lwd = 2)
+
+```
+
+```{r rez_dis, fig.cap = "Figure 15. Residuals distribution for the statistical model", fig.align = "center"}
+
+regression_points <-  data.frame(resid(first_model))
+colnames(regression_points) <- "residuals"
+ggplot(regression_points, aes(x = residuals)) +
+  geom_histogram(bins = 20, colour="#ff6600", fill = "#3080cf", alpha = 0.4) +
+  labs(x = "Residuals") +
+  theme_bw()
+
+```
+
+
+```{r rez_fv, fig.cap = "Figure 16. Residuals graph for the fitted values, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = predict(first_model), y = resid(first_model))) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.7, colour="#3080cf", alpha = 0.3) +
+  labs(y = "Residuals", x = "Fitted Values") +
+  theme_bw()
+
+```
+
+
+```{r rez_SI, fig.cap = "Figure 17. Residuals graph for the Stringency Index, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+rstandard_val <- rstandard(first_model)
+
+ggplot(tidy_joined_dataset, aes(x = Stringency_Index, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.7, colour="#3080cf", alpha = 0.3) +
+  labs(y = "rstandard", x = "Stringency Index") +
+  theme_bw()
+
+```
+
+
+```{r rez_ESI, fig.cap = "Figure 18. Residuals graph for the Economic Support Index, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"} 
+
+ggplot(tidy_joined_dataset, aes(x = Economic_Support_Index, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.7, colour="#3080cf", alpha = 0.3) +
+  labs(y = "rstandard", x = "Economic Support Index") +
+  theme_bw()
+
+```
+
+```{r rez_APP, fig.cap = "Figure 19. Residuals graph for the Proportion of population that is 15-64 years old, in 2019, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = age15_64_population_prop_2019, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.7, colour="#3080cf", alpha = 0.3) +
+  labs(y = "rstandard", x = "Proportion of population that is 15-64 years old, in 2019") +
+  theme_bw()
+
+
+```
+
+
+```{r rez_SP, fig.cap = "Figure 20. Residuals graph for the Smoking prevalence for 15+ year olds in 2016, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = Smoking_prevalence_15_2016, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.7, colour="#3080cf", alpha = 0.3) +
+  labs(y = "rstandard", x = "Smoking prevalence for 15+ year olds in 2016") +
+  theme_bw()
+
+
+```
+
+
+```{r rez_NM, fig.cap = "Figure 21. Residuals graph for the nurses and midwives per 1000 in 2018, with a Lowess curve in blue and a horizontal line at zero in red.", fig.align = "center"}
+
+ggplot(tidy_joined_dataset, aes(x = nurses_midwives_per_1000_2018, y = rstandard_val)) +
+  geom_point(shape = 1) +
+  geom_hline(yintercept = 0,  size = 0.5, colour= "red") +
+  geom_smooth(method = "loess", se = TRUE, size = 0.7, colour="#3080cf", alpha = 0.3) +
+  labs(y = "rstandard", x = "nurses and midwives per 1000 in 2018") +
+  theme_bw()
+
+
+```
+
+
+In table 3, we see that the GVIF value for the variables with 1 degree of freedom each, and the GVIF^(1/(2*Df)) value for the variables with more than 1 degree of freedom each are all between 1 and 5. This indicates that there is a moderate correlation between the predictor variables. Since there is not a lot of multicollinearity between the predictor variables, the statistical power of the model is not greatly reduced. 
+
+
+```{r   model_vifs}
+
+kable(car::vif(first_model),
+      caption = "Table 3: VIF table") %>%
+  kable_styling(full_width = F)
+
+
+```
+
+
+## ii. Model Results and Interpretation
+
+```{r   transf_model_just}
+
+summary(first_model)$call
+
+```
+
+Given the nature of splines, interpretation of the model coefficients is deemed futile as ceteris paribus (all else unchanged) is not a possibility to predict the average number of cumulative cases per 10000 transformed to the power of 0.5. Alternatively, our focus on examining the coefficients and their relative significance compared to other models relies on Omnibus test results that we go over in the ANOVA table analysis section.
+
+However, what our coefficient p-values in table 4 tell us is that the stringency index with its first 4 levels, age and population with its 5th level, and nurses and midwives per 1000 levels 3, 4, and 5 share the trait of their levels having a p-value<0.05, leading us to find them helpful in our model for predicting the average number of cumulative cases per 10000 transformed to the power of 0.5. 
+
+Whereas Economic Stringency Index and Smoking prevalence were found to be insignificant with p-values>0.05.
+
+
+***
+```{r   transf_model_summary}
+
+kable(summary(first_model)$coefficients, 
+      digits = 4,
+      caption = "Table 4. Model Summary Table") %>%
+  kable_styling(full_width = F)
+
+
+```
+
+Seeing the adjusted R-squared of 0.542 using our model, we found that it explains a lot of variability of the average number of cumulative cases per 10000 transformed to the power of 0.5 which, coupled with the significance of the predictors and the low p-value of 3.565e-0.8 for our model, lead us to believe it is helpful in its explanatory ability. 
+
+```{r   transf_model_summary_overall}
+
+#Residual Standard error (Like Standard Deviation)
+RSE <- summary(first_model)$sigma #Residual Standard Error
+RSE_df <- summary(first_model)$df[2] #Residual Standard Error df
+MR_2 <- summary(first_model)$r.squared #Multiple R-squared
+AR_2 <- summary(first_model)$adj.r.squared # adjusted R-squared
+FS <- summary(first_model)$fstatistic[1]   # f-statistic
+fs_n <- summary(first_model)$fstatistic[2]   # f-statistic numerator df
+fs_d <- summary(first_model)$fstatistic[3]   # f-statistic denominator df
+fs_p <- pf(summary(first_model)$fstatistic[1],summary(first_model)$fstatistic[2],summary(first_model)$fstatistic[3],lower.tail=FALSE)
+
+new_summary_1 <- data.frame() %>% 
+  rbind(list("Residual Standard Error", RSE, RSE_df),
+      list("Multiple R-squared", MR_2, ""),
+      list("Adjusted R-squared", AR_2, "")) %>%
+kable(format = "html", 
+      digits = 3, 
+      table.attr = "style='width:30%;'", 
+      col.names = c("", "Value", "df"),
+      row.names = FALSE) %>%
+  kable_styling(full_width = F)
+
+
+new_summary_2 <- data.frame() %>% 
+  rbind(list("Model F-statistic", FS, fs_n, fs_d),
+      list("P-value", fs_p, "", "")) %>%
+  mutate_if(is.numeric, funs(as.character(signif(., 4)))) %>%
+kable(format = "html", 
+      digits = 3, 
+      table.attr = "style='width:80%;'",
+      col.names = c("", "Value", "Numerator df", "Denominator df"),
+      row.names = FALSE) %>%
+  kable_styling(full_width = F)
+
+new_summary_1
+new_summary_2
+
+```
+
+
+***
+
+
+## iii. Inference for multiple regression
+
+Interpretation of the ANOVA table result from table 5:
+
+The Stringency Index with knots at 36.11, 61.064, 77.3335 and 92.7295 with 5 degrees of freedom keeps adding 78.1337 sum of squares. With an F value = 6.4999 and p-value = 0.0001, we can conclude that the Stringency Index alone in the model explains a significant amount of variability. 
+
+The Economic Support Index with 1 degree of freedom keeps adding 126.2974 sum of squares. With an F value = 10.5065 and p-value = 0.0019, we can conclude that the model with Economic Support Index, given that the Stringency Index with knots at 36.11, 61.064, 77.3335 and 92.7295 is in the model, is statistically significant.
+
+The Proportion of the population that is 15-64 years old in 2019 with a knot at 3.5473, 62.88236, 65.88236 and 72.63432 with 5 degrees of freedom keeps adding 106.2663 sum of squares. With an F value =15.644 and p-value<0.0001, we can conclude that the proportion of the population that is 15-64 years old in the model, given that the Stringency Index (with knots at 36.11, 61.064, 77.3335 and 92.7295) and Economic Support Index are in the model, is statistically significant.
+
+The nurses and midwives per 1000 in 2018 with a knot at 0.43467, 1.654765, 4.19668 and 12.57969 with 5 degrees of freedom keeps adding 48.6342 sum of squares. With an F value=4.0458 and p-value<0.05, we can conclude that the nurses and midwives per 1000 in the model, given that the Stringency Index (with knots at 36.11, 61.064, 77.3335 and 92.7295), the Economic Support Index, and Proportion of the population that is 15-64 years old in 2019 (with a knot at 3.5473, 62.88236, 65.88236 and 72.63432) are in the model, is statistically significant.
+
+The Smoking prevalence for 15+ year olds in 2016 with 1 degree of freedom keeps adding 8.8368 sum of squares. With an F value=0.7351 and p-value=0.3946, we can conclude that the nurses and midwives per 1000 in the model, given that the Stringency Index (with knots at 36.11, 61.064, 77.3335 and 92.7295), the Economic Support Index, and Proportion of the population that is 15-64 years old in 2019 (with a knot at 3.5473, 62.88236, 65.88236 and 72.63432), and the nurses and midwives per 1000 in 2018 (with a knot at 0.43467, 1.654765, 4.19668 and 12.57969) are in the model, is not statistically significant at a significance level of 0.05. 
+
+
+
+```{r   transf_anova_table}
+ kable(anova(first_model), 
+       digits = 4,
+       caption = "Table 5. ANOVA Table") %>%
+  kable_styling(full_width = F)
+
+```
+
+From figure 22, the wider pink 95% for the transformed cumulative confirmed cases per 10,000 individuals (raised to the power of 0.5) against their government response measure by the Stringency Index. The other predictor variables are set equal to their median: median economic support index = 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05. The knots chosen are shown by the black vertical lines at the 5th percentile SI = 36.1100, 35th percentile SI = 61.0640, 65th percentile SI= 77.3335, 95th percentile SI= 92.7295. From the Stringency Index levels 20 to 80 and from 95 to 100, there are chances that the predicted transformed CCC per 10,000 can be 0. The majority of the countries are between Stringency Index 50 to 95. Around this range, the 95% PI is quite constant in width.
+
+With predictor variable values other than the spline on the Stringency Index held constant at the aforementioned values, we notice our 95% confidence intervals in the 1st level to be very wide and falling into negative numbers of the cumulative confirmed cases per 10,000 (raised to 0.5), along with the spline showing that our accuracy is not reliable when it comes to the 95% confidence intervals before the first knot. We see a narrowing of the confidence intervals toward the 3rd and 4th levels showing a relatively better accuracy in these levels compared to their counterparts.
+
+
+```{r  spline_model_1, fig.cap =  "Figure 22. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.5) for individual countries against their government response measured by the Stringency Index, where median economic support index = 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05. The blue line is the spline, with its associated 95% CI and wider pink 95% PI.  The vertical black lines indicate the chosen knot locations at the 5th percentile SI = 36.1100, 35th percentile SI = 61.0640, 65th percentile SI= 77.3335, 95th percentile SI= 92.7295.", fig.align = "center"}
+
+
+filtered  <- tidy_joined_dataset %>%
+   ungroup() %>%
+     dplyr::select("cumulative_confirmed_cases_per_10000","cumulative_confirmed_cases_per_10000_transf", "Population2019", "Stringency_Index", "Economic_Support_Index", "age15_64_population_prop_2019" , "nurses_midwives_per_1000_2018", "Smoking_prevalence_15_2016")
+
+
+
+SI_M <- tidy_joined_dataset %>% 
+  ungroup() %>%
+  summarize(median = median(Stringency_Index , na.rm = T))     # 70.14
+ESI_M <- tidy_joined_dataset %>% 
+  ungroup() %>%
+  summarize(median = median(Economic_Support_Index , na.rm = T))    # 50
+APP_M <- tidy_joined_dataset %>% 
+  ungroup() %>%
+  summarize(median = median(age15_64_population_prop_2019 , na.rm = T))   # 64.65951
+NM_M <- tidy_joined_dataset %>% 
+  ungroup() %>%
+  summarize(median = median(nurses_midwives_per_1000_2018 , na.rm = T))   # 2.47285
+SP_M <- tidy_joined_dataset %>% 
+  ungroup() %>%
+  summarize(median = median(Smoking_prevalence_15_2016 , na.rm = T))   # 17.05	
+
+
+
+# Get min/max values of SI using the range() function
+SI_lims = filtered %>%
+    select(Stringency_Index) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+SI_grid = seq(from = min(SI_lims), to = max(SI_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = SI_grid ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = SI_grid ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="confidence",
+               level=.95)
+
+
+# pred
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = Stringency_Index, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = SI_grid, y = pred[,"fit"]), color = "#3080cf") +
+  geom_vline(xintercept = c(quantile_1[1], quantile_1[2], quantile_1[3], quantile_1[4]),  size = 0.3, colour= "black", linetype="dotted") +
+  geom_ribbon(aes(x = SI_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "red") +
+  geom_ribbon(aes(x = SI_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "#3080cf")+
+  xlim(SI_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.5", x = "Stringency Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+
+
+
+```
+
+From figure 23, the wider pink 95% for the transformed cumulative confirmed cases per 10,000 individuals (raised to the power of 0.5) against their nurses and midwives per 1000 in 2018. The other predictor variables are set equal to their median: median Stringency index = 70.14, median economic support index = 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, and median Smoking prevalence for people ages 15+ in 2016 = 17.05 The knots chosen are shown by the black vertical lines at the 5th percentile NM = 0.434670, 35th percentile NM = 1.654765, 65th percentile NM = 4.196680, 95th percentile NM = 12.579690. The majority of countries are from 0 to 5. In this range, there are chances that the predicted transformed CCC ( raised to the power of 0.5 ) is 0. The 95% PI around this range is quite constant in width. On the other hand, around the 4th knot at the 95th percentile NM =12.579690, the 95% PI increase in width at the end of the predictor range.
+
+With predictor variable values other than the spline on the Nurses and Midwives held constant at the aforementioned values, we see our 95% confidence intervals being very wide especially through the 1st, 2nd and 5th levels. With the 1st level being only 5 percentiles in width and the 2nd level having wide intervals, it points to the inaccuracy of our confidence intervals for our nurses and midwives in that segment. The intervals are narrower at the 3rd and 4th levels along the range of 5 to 13 cumulative confirmed cases per 10,000 (raised to 0.5).
+
+```{r  spline_model_1_NM, fig.cap =  "Figure 23. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.5) for individual countries against their nurses and midwives per 1000 in 2018, where median Stringency index = 70.14, median economic support index = 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, and median Smoking prevalence for people ages 15+ in 2016 = 17.05. The blue line is the spline, with its associated 95% CI and wider pink 95% PI. The vertical black lines indicate the chosen knot locations at the 5th percentile NM = 0.434670, 35th percentile NM = 1.654765, 65th percentile NM = 4.196680, 95th percentile NM = 12.579690.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+NM_lims = filtered %>%
+    select(nurses_midwives_per_1000_2018) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+NM_grid = seq(from = min(NM_lims), to = max(NM_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = NM_grid,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = NM_grid,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="confidence",
+               level=.95)
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = nurses_midwives_per_1000_2018, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_vline(xintercept = c(quantile_3[1], quantile_3[2], quantile_3[3], quantile_3[4]),  size = 0.3, colour= "black", linetype="dotted") +
+  geom_line(aes(x = NM_grid, y = pred[,"fit"]), color = "#3080cf") +
+  geom_ribbon(aes(x = NM_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "red") +
+  geom_ribbon(aes(x = NM_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "#3080cf")+
+  xlim(NM_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.5", x = "nurses and midwives per 1000 in 2018") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+
+```
+
+From figure 24, the wider pink 95% for the transformed cumulative confirmed cases per 10,000 individuals (raised to the power of 0.5) against their Proportion of population that is 15-64 years old, in 2019. The other predictor variables are set equal to their median: median Stringency index = 70.14, median economic support index = 50, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05. The knots chosen are shown by the black vertical lines at the 5th percentile APP = 53.54730, 35th percentile APP = 62.88236, 65th percentile APP = 65.88236, 95th percentile APP = 72.63432. The majority of the countries are between the first knot at the 5th percentile and the 4th knot at the 95th percentile. In the 0 to 75 range of the proportion of the population that is 15-64 years old, there are chances that the predicted transformed CCC ( raised to the power of 0.5 ) is 0.
+
+With predictor variable values other than the spline on the proportion of the population being 15-64  held constant at the aforementioned values, our 95% confidence intervals are the tightest in the 3rd level while they widen at the ends.
+
+```{r  spline_model_1_APP, fig.cap =  "Figure 24. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.5) for individual countries against their Proportion of population that is 15-64 years old, in 2019, where median Stringency index = 70.14, median economic support index = 50, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05. The blue line is the spline, with its associated 95% CI and wider pink 95% PI.The vertical black lines indicate the chosen knot locations at the 5th percentile APP = 53.54730, 35th percentile APP = 62.88236, 65th percentile APP = 65.88236, 95th percentile APP = 72.63432.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+APP_lims = filtered %>%
+    select(age15_64_population_prop_2019) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+APP_grid = seq(from = min(APP_lims), to = max(APP_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = APP_grid,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = APP_grid,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="confidence",
+               level=.95)
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = age15_64_population_prop_2019, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = APP_grid, y = pred[,"fit"]), color = "#3080cf") +
+  geom_vline(xintercept = c(quantile_2[1], quantile_2[2], quantile_2[3], quantile_2[4]),  size = 0.3, colour= "black", linetype="dotted") +
+  geom_ribbon(aes(x = APP_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "red") +
+  geom_ribbon(aes(x = APP_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "#3080cf") +
+  xlim(APP_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.5", x = "Proportion of population that is 15-64 years old, in 2019") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+```
+
+From figure 25, the wider pink 95% for the transformed cumulative confirmed cases per 10,000 individuals (raised to the power of 0.5) against their Smoking prevalence for 15+-year-olds in 2016. The other predictor variables are set equal to their median: median Stringency index = 70.14, median economic support index = 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, and median nurses midwives per 1000 in 2018 = 2.47285.  All the countries spread out from 0 to 40 smoking prevalence. From 0 to 40 smoking prevalence, there is a chance that the predicted transformed CCC per 10,000 can be 0.
+
+With predictor variable values other than Smoking prevalence for 15+ year olds held constant at the aforementioned values, our 95% confidence intervals are mostly constant in their width but slightly wider at the ends.   
+
+```{r  spline_model_1_SP, fig.cap =  "Figure 25. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.5) for individual countries against their Smoking prevalence for 15+ year olds in 2016, where median Stringency index = 70.14, median economic support index = 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, and median nurses midwives per 1000 in 2018 = 2.47285. The blue line is the spline, with its associated 95% CI and wider pink 95% PI.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+SP_lims = filtered %>%
+    select(Smoking_prevalence_15_2016) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+SP_grid = seq(from = min(SP_lims), to = max(SP_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = SP_grid),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = 50,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = SP_grid),
+               interval="confidence",
+               level=.95)
+
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = Smoking_prevalence_15_2016, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Economic_Support_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = SP_grid, y = pred[,"fit"]), color = "#3080cf") +
+  geom_ribbon(aes(x = SP_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "red") +
+   geom_ribbon(aes(x = SP_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "#3080cf") +
+  xlim(SP_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.5", x = "Smoking prevalence for 15+ year olds in 2016") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+```
+
+From figure 26, the wider pink 95% for the transformed cumulative confirmed cases per 10,000 individuals (raised to the power of 0.5) against their government response measured by the Economic Support Index. The other predictor variables are set equal to their median: median Stringency index = 70.14, median population proportion of ages 15 to 64 in 2019 = 64.65951, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05.  All the countries spread out from 0 to 100. From 0 to 100, there is a chance that the predicted transformed CCC per 10,000 can be 0.
+
+With predictor variable values other than the Economic Support Index held constant at the aforementioned values, our 95% confidence intervals are mostly constant in their width but slightly wider at the ends.   
+
+```{r  spline_model_1_ES, fig.cap =  "Figure 26. Interactive Scatterplot for the cumulative confirmed cases per 10,000 (raised to 0.5) for individual countries against their government response measured by the Economic Support Index, where median Stringency index = 70.14, median population proportion of ages 15 to 64 in 2019 = 64.65951, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05. The blue line is the spline, with its associated 95% CI and wider pink 95% PI.", fig.align = "center"}
+
+
+
+# Get min/max values of SI using the range() function
+ES_lims = filtered %>%
+    select(Economic_Support_Index) %>%
+    range
+
+# Generate a sequence of SI values spanning the range
+ES_grid = seq(from = min(ES_lims), to = max(ES_lims))
+
+
+# Predict the value of the generated ages,
+# returning the standard error using se = TRUE
+pred = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = ES_grid,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="prediction",
+               level=.95)
+
+pred_2 = predict(first_model, newdata = data.frame(Stringency_Index = 70.14 ,
+                                   Economic_Support_Index = ES_grid,
+                                   age15_64_population_prop_2019 = 64.65951,
+                                   nurses_midwives_per_1000_2018 = 2.47285,
+                                   Smoking_prevalence_15_2016 = 17.05),
+               interval="confidence",
+               level=.95)
+
+
+
+# Plot the spline and error bands
+
+p_6 <- ggplot() +
+  geom_point(data = tidy_joined_dataset, aes(x = Economic_Support_Index, y = cumulative_confirmed_cases_per_10000_transf, size = Population2019, color = Stringency_Index, label = Country ), alpha = 0.4) +
+  geom_line(aes(x = ES_grid, y = pred[,"fit"]), color = "#3080cf") +
+  geom_ribbon(aes(x = ES_grid,
+                  ymin = pred[,"lwr"], 
+                  ymax = pred[,"upr"]),
+              alpha = 0.1,
+              fill = "red") +
+  geom_ribbon(aes(x = ES_grid,
+                  ymin = pred_2[,"lwr"], 
+                  ymax = pred_2[,"upr"]),
+              alpha = 0.1,
+              fill = "#3080cf") +
+  xlim(ES_lims) +
+  scale_color_gradient(low="#ffff00", high="brown") +
+  labs(y = "(Cumu. confirmed cases per 10,000)^0.5", x = "Economic Support Index") +
+  theme(panel.grid.major =  element_line(colour = "#DCDCDC"),
+        panel.grid.minor = element_line(colour = "#DCDCDC"),
+        axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black",
+                                    fill=NA,
+                                    size=0.5))
+
+ggplotly(p_6)
+
+
+```
+
+
+The 95% Prediction intervals (in table 6) for the predicted transformed CCC per 10,000 individuals; for example, a country with a Stringency Index equals 30, and the other predictor variables are set equal to their median: median economic support index equal 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05, the transformed cumulative cases per 10,000 are predicted to be between -8.48049 and 7.43092.
+
+It is similar to other Stringency indices 50,  70.14, and 90 in the prediction intervals table. In other words, for any country with a Stringency Index as 50, 70.14, or 90 (with the other predictor variables set equal to their median), the transformed cumulative cases are predicted to be between the lower and upper limit in table 6.
+
+```{r transf_model_PI}
+
+indexes = c(30, 50, 70.14, 90)
+
+PI <- data.frame(predict(first_model, 
+              newdata=data.frame(Stringency_Index= indexes, 
+                                 Economic_Support_Index = 50,
+                                 age15_64_population_prop_2019 = 64.65951,
+                                 nurses_midwives_per_1000_2018 = 2.47285,
+                                 Smoking_prevalence_15_2016 = 17.05), 
+              interval="prediction", level=.95))
+PI$SI <- indexes
+PI <- PI %>%
+  dplyr::select(c(SI, fit, lwr, upr)) # %>%
+  # mutate(fit = fit^(1/0.5),
+  #        lwr = lwr^(1/0.5),
+  #        upr = upr^(1/0.5))
+
+colnames(PI) <- c("SI" , "Point Estimate" , "Lower Limit" , "Upper Limit")
+
+kable(PI,
+    digits = 5,
+    caption = "Table 6. The 95% Prediction intervals for the $\text{cumulative confirmed cases per 10,000}^{0.5}$, where Stringency Index = 20, 50, 70.14, 90, respectively, for median economic support index = 50, median population proportion of ages 15 to 64 in 2019 = 64.65951, median nurses midwives per 1000 in 2018 = 2.47285, and median Smoking prevalence for people ages 15+ in 2016 = 17.05.
+") %>%
+  kable_styling(full_width = F)
+
+```
+
+
+
+# IV. Discussion 
+
+## i. Conclusions
+
+We recognize that interpretability is sometimes to be traded for the sake of a better model. Our analysis shows that the model we proposed seems to be helpful as it explains quite a good amount of variability in cumulative confirmed cases of covid-19 per 10,000 individuals (54.74%). 
+
+We see evidence to suggest that CCC is positively correlated with Stringency and Economic Support Index, which aligns with our expectation, for it is reasonable for a government to respond strictly and spend more budget on income support packages if their people are more impacted by the pandemic. Moreover, it is also positively correlated with nurses and midwives and the proportion of 15-64-year-olds in the population, which matches the expectation that we explained in the introduction.
+
+
+## ii. Limitations
+
+This project is limited by the data available. The addition of the three World Bank indicators reduced the countries that were represented in project 2 by about 53.3%, due to excluding countries with a missing value in any of the variables used. Additionally, there were some notable outliers and points with high leverage that could not be removed since they are not mistakes and were necessary, leading to keeping their effects on the model.
+ 
+The choice to use a non-linear model made the interpretation of the relationship between the variables more complex and less straightforward, which is not a bad thing when used appropriately. However, no test was done to check for overfitting, so the adequacy of the complexity of the model cannot be determined.
+
+
+## iii. Further questions
+
+The relationship studied in this report is not one that can be generalized to other sets of dates, since no test was done to check its generalizability. Also, sensitivity modeling can be done to check the effect of the outliers on the model. Another study can be done where the aim is the same as this study, but uses methods other than regression analysis.
+
+
+***
+
+
+# V. Citations and References {-}
